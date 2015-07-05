@@ -31,7 +31,7 @@ class WorkSubmitter(threading.Thread):
 
 # This thread will read from the processed list and write the results to disk
 class ResultLogger(threading.Thread):
-  def __init__(self, sleep_cycle=0.5):
+  def __init__(self, sleep_cycle=0.05):
     super(ResultLogger, self).__init__()
     self.sleep_cycle = sleep_cycle
 
@@ -40,14 +40,14 @@ class ResultLogger(threading.Thread):
       message = WorkQueue.pop_processed()
       if message is not None:
         outfile = open(logfile, 'a')
-        timestamp = time.strftime('%Y%m%d%H%M%S', time.gmtime(time.time()))
+        timestamp = time.strftime('%Y%m%d%H%M%S', time.gmtime(message.finishtime)) + '{0:.3f}'.format(message.finishtime % 1)[1:]
         myurl = message.result['url']
         mycode = str(message.result['resp_code'])
         mysize = str(message.result['resp_size'])
-        mytime = '{0:.2f}'.format(message.result['req_time'])
-        myenqtime = str(message.enqueuetime)
-        mydeqtime = str(message.dequeuetime)
-        myfintime = str(message.finishtime)
+        mytime = '{0:.3f}'.format(message.result['req_time'])
+        myenqtime = str(int(message.enqueuetime)) + '{0:.3f}'.format(message.enqueuetime % 1)[1:]
+        mydeqtime = str(int(message.dequeuetime)) + '{0:.3f}'.format(message.dequeuetime % 1)[1:]
+        myfintime = str(int(message.finishtime)) + '{0:.3f}'.format(message.finishtime % 1)[1:]
         outline = timestamp + ',' + myurl + ',' + mycode + ',' + mysize + ',' + mytime + ',' + myenqtime + ',' + mydeqtime + ',' + myfintime + '\n'
         outfile.write(outline)
         outfile.close()
