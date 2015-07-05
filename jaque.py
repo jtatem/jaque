@@ -43,11 +43,11 @@ QueueList = []
 
 # Turns on a lot of verbose console output
 EnableDebug = False
-EnableConsoleStats = True
+EnableConsoleStats = False 
 
 # We can send stats to Graphite on a per-queue basis
-EnableGraphite = True 
-GraphiteServer = '192.168.0.48'
+EnableGraphite = False
+GraphiteServer = 'graphite_host'
 GraphitePort = 2003
 GraphiteMetricStub = 'jaque.testing.' # can change this to be in alignment with your graphite naming structure
 
