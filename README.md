@@ -10,6 +10,7 @@ Create a Queue:
 Create a message handler that takes a message payload and returns a result, you can have many handlers:
 
   def myhandler(payload):
+  
     return do_something(payload)
 
 Create a message with payload and the name of the handler function that should process the payload:
@@ -29,4 +30,5 @@ Messages are executed by worker threads in FIFO order.  Completed messages are m
 Collect the result. If a message failed, the result will contain the exception thrown:
 
   completedmessage = MyQueue.pop_processed_by_uuid(myuuid)
+  
   result = completedmessage.result
