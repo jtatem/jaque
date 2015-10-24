@@ -47,7 +47,7 @@ EnableConsoleStats = False
 
 # We can send stats to Graphite on a per-queue basis
 EnableGraphite = False
-GraphiteServer = 'graphite_host'
+GraphiteServer = 'graphite_server'
 GraphitePort = 2003
 GraphiteMetricStub = 'jaque.testing.' # can change this to be in alignment with your graphite naming structure
 
@@ -56,9 +56,13 @@ GraphiteMetricStub = 'jaque.testing.' # can change this to be in alignment with 
 # will be passed to the handler function as the sole argument
 
 class Message(object):
-  def __init__(self, payload, handler):
+  def __init__(self, payload, handler, retry=False, max_attempts=5):
     self.payload = payload
     self.handler = handler
+    self.retry = retry
+    self.max_attempts = max_attempts
+    self.attempts = 0
+    self.orig_enqueuetime = 0
     self.enqueuetime = 0
     self.dequeuetime = 0
     self.finishtime = 0
@@ -72,16 +76,18 @@ class Message(object):
   def execute(self):
     self.dequeuetime = time.time()
     self.isactive = True
+    self.attempts += 1
     try:
       self.result = self.handler(self.payload)
       self.successful = True
       self.finishtime = time.time()
       self.isactive = False
     except:
-      e = sys.exc_info()[0]
+      e = sys.exc_info()
       self.result = e
       self.finishtime = time.time()
       self.isactive=False
+      self.successful=False
     return self.result
 
 # Queue object - 3 queues really; queued, active, processed.  Optional ability to set max thread count and "queue name" at init. Threads are all created
@@ -105,6 +111,7 @@ class Queue(object):
     self.enqcounter = 0
     self.deqcounter = 0
     self.fincounter = 0
+    self.retrycounter = 0
 
     self.qdepth = 0
     self.processed_qdepth = 0
@@ -141,6 +148,8 @@ class Queue(object):
   def enqueue_message(self, message):
     if EnableDebug:
       print('Enqueued message ' + message.uuid)
+    if message.attempts == 0:
+      message.orig_enqueuetime = time.time()
     message.enqueuetime = time.time()
     self.queued.append(message)
     self.enqcounter += 1
@@ -155,7 +164,26 @@ class Queue(object):
         print('Dequeued message ' + message.uuid)
       message.execute()
       self.active.remove(message)
-      self.processed.append(message)
+      if message.successful:
+        self.processed.append(message)
+        if EnableDebug:
+          print('Successful execution of message ' + message.uuid)
+      elif message.retry:
+        if EnableDebug:
+          print('Message ' + message.uuid + ' failed on attempt ' + str(message.attempts))
+        if message.attempts < message.max_attempts:
+          if EnableDebug:
+            print('Message ' + message.uuid + ' re-enqueued for retry')
+          self.enqueue_message(message)
+          self.retrycounter += 1
+        else:
+          if EnableDebug:
+            print('Message ' + message.uuid + ' has hit max retries and will not be attempted again')
+          self.processed.append(message)
+      else:
+        if EnableDebug:
+          print('Message ' + message.uuid + ' failed and is not configured to retry')
+        self.processed.append(message)
       self.fincounter += 1
       if EnableDebug:
         print('Finished message ' + message.uuid)
@@ -259,7 +287,7 @@ class QueueRunner(threading.Thread):
 # Every Queue gets a stats thread that keeps an eye on things.  Console and Graphite stats output handled here too.  Also starts with queue invocation and shouldn't be invoked directly
     
 class QueueStatsThread(threading.Thread):
-  def __init__(self, queue, maxstats=50, interval=5):
+  def __init__(self, queue, maxstats=50, interval=30):
     super(QueueStatsThread, self).__init__()
     self.queue = queue
     self.maxstats = maxstats
@@ -299,6 +327,7 @@ class QueueStatsThread(threading.Thread):
       curstats['enqcounter'] = self.queue.enqcounter
       curstats['deqcounter'] = self.queue.deqcounter
       curstats['fincounter'] = self.queue.fincounter
+      curstats['retrycounter'] = self.queue.retrycounter
 
       # Keep up to [maxstats] historical stats things
 
@@ -325,6 +354,7 @@ class QueueStatsThread(threading.Thread):
         graphitestr += graphitestub + 'enqcounter ' + str(curstats['enqcounter']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'deqcounter ' + str(curstats['deqcounter']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'fincounter ' + str(curstats['fincounter']) + ' ' + curtime + '\n'
+        graphitestr += graphitestub + 'retrycounter ' + str(curstats['retrycounter']) + ' ' + curtime + '\n'
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((GraphiteServer, GraphitePort))
@@ -349,7 +379,8 @@ class QueueStatsThread(threading.Thread):
         outstr += str(curstats['threadcount']) + ','
         outstr += str(curstats['enqcounter']) + ','
         outstr += str(curstats['deqcounter']) + ','
-        outstr += str(curstats['fincounter'])
+        outstr += str(curstats['fincounter']) + ','
+        outstr += str(curstats['retrycounter'])
         print(outstr)
       time.sleep(self.interval)
   
