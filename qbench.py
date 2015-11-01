@@ -6,23 +6,27 @@ import urllib2
 import random
 import argparse
 
-SleeperQueue = Queue(threads=100, name='SleeperQueue')
 
 parser = argparse.ArgumentParser(description='Simple load generator / benchmark tool for Jaque')
 
 parser.add_argument('-f', type=str, default='./rand.txt', help='Input file of message durations, default ./rand.txt')
 parser.add_argument('-n', type=int, default=5000, help='Number of messages')
+parser.add_argument('-t', type=int, default=100, help='Thread count, default 100')
 
 args = parser.parse_args()
 filename = args.f
 count = args.n
+queuethreads = args.t
+
+SleeperQueue = Queue(threads=queuethreads, name='SleeperQueue')
+
 
 def handler_func(interval):
   time.sleep(interval)
   return 0
 
 if __name__ == '__main__':
-  print('Starting benchmark with ' + str(count) + ' sleepers using ' + filename + ' as input')
+  print('Starting benchmark with ' + str(count) + ' sleepers using ' + filename + ' as input. ' + str(queuethreads) + ' worker threads.')
   start = time.time()
   f = open(filename, 'r')
   i = 0
