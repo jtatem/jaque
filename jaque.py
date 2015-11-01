@@ -37,30 +37,43 @@ import socket
 # result = completedmessage.result
 
 
+# Whether to track stats.  Uses an additional thread.  Setting to False also disables EnableConsoleStats and EnableGraphite
+
+EnableStats = True
 
 # Used as an index of queues that have been created
 QueueList = []
 
 # Turns on a lot of verbose console output
-EnableDebug = False
+EnableDebug = False 
 EnableConsoleStats = False 
 
 # We can send stats to Graphite on a per-queue basis
-EnableGraphite = False
-GraphiteServer = 'graphite_server'
+EnableGraphite = False 
+GraphiteServer = 'graphite-server.example.com'
 GraphitePort = 2003
 GraphiteMetricStub = 'jaque.testing.' # can change this to be in alignment with your graphite naming structure
+
+
+EnableConsoleStats = EnableConsoleStats and EnableStats
+EnableGraphite = EnableGraphite and EnableStats
 
 # Message object has several useful attributes to track its progress and status.  Every message gets a random UUID.  I don't know if uuid.uuid4() is
 # collision safe.  Whatever.  Init requires a payload and handler.  Handler is the function that should be called to process the payload.  The payload
 # will be passed to the handler function as the sole argument
 
+# retry enables automatic retry on exceptions from the handler function.  max_attempts controls how many tries.  Only the final try (when the handler succeeds or max_attempts is reached) will be included when the message is placed in the processed queue
+
+# discard_result controls whether the message with result are added to the processed queue after execution.  If the handler takes care of all desired work, setting this to True eliminates the need to monitor/manage the processed queue 
+
 class Message(object):
-  def __init__(self, payload, handler, retry=False, max_attempts=5):
+  def __init__(self, payload, handler, retry=False, max_attempts=5, discard_result=False, delay=0):
     self.payload = payload
     self.handler = handler
     self.retry = retry
     self.max_attempts = max_attempts
+    self.discard_result = discard_result
+    self.delay = delay
     self.attempts = 0
     self.orig_enqueuetime = 0
     self.enqueuetime = 0
@@ -99,12 +112,14 @@ class Queue(object):
     self.queued = []
     self.processed = []
     self.active = []
+    self.delayed = []
     self.paused = False
     self.threads = threads
     QueueList.append(self)
     self.stats = []
     self.threads = []
     self.name = name
+    self.shutdown = False
 
     # stats attributes
 
@@ -121,10 +136,11 @@ class Queue(object):
     self.finrate = 0
     self.threadcount = 0
 
-    # start stats thread
+    # start stats thread, if stats enabled
 
-    statsthread = QueueStatsThread(self)
-    statsthread.start()
+    if EnableStats:
+      statsthread = QueueStatsThread(self)
+      statsthread.start()
 
     # start runner threads
 
@@ -132,6 +148,11 @@ class Queue(object):
       runner = QueueRunner(self, startactive=True)
       self.threads.append(runner)
       runner.start()
+
+    # start delayed queue sweeper
+
+    sweeper = DelaySweeper(self, interval=1)
+    sweeper.start()
 
   # self explanatory
   def clear_counters(self):
@@ -150,9 +171,15 @@ class Queue(object):
       print('Enqueued message ' + message.uuid)
     if message.attempts == 0:
       message.orig_enqueuetime = time.time()
-    message.enqueuetime = time.time()
-    self.queued.append(message)
-    self.enqcounter += 1
+    if message.delay < 0:
+      raise ValueError('Message delay cannot be negative')
+    elif message.delay > 0:
+      self.delayed.append(message)
+      self.enqcounter += 1
+    else:
+      message.enqueuetime = time.time()    
+      self.queued.append(message)
+      self.enqcounter += 1
 
   # dequeues and executes a message
   def dequeue_message(self):
@@ -165,7 +192,8 @@ class Queue(object):
       message.execute()
       self.active.remove(message)
       if message.successful:
-        self.processed.append(message)
+        if not message.discard_result:
+          self.processed.append(message)
         if EnableDebug:
           print('Successful execution of message ' + message.uuid)
       elif message.retry:
@@ -179,11 +207,13 @@ class Queue(object):
         else:
           if EnableDebug:
             print('Message ' + message.uuid + ' has hit max retries and will not be attempted again')
-          self.processed.append(message)
+          if not message.discard_result:
+            self.processed.append(message)
       else:
         if EnableDebug:
           print('Message ' + message.uuid + ' failed and is not configured to retry')
-        self.processed.append(message)
+        if not message.discard_result:
+          self.processed.append(message)
       self.fincounter += 1
       if EnableDebug:
         print('Finished message ' + message.uuid)
@@ -207,6 +237,9 @@ class Queue(object):
   # delete all processed messages
   def flush_processed_messages(self):
     self.processed = []
+
+  def flush_delayed_messages(self):
+    self.delayed = []
 
   # get a single processed message by uuid, returns None if not found, and we spit out an error if we get 2 matches cause that means uuid.uuid4() is not very collision safe
   def pop_processed_by_uuid(self, uuid_to_get):
@@ -278,11 +311,41 @@ class QueueRunner(threading.Thread):
     self.runnerid = str(uuid.uuid4())
 
   def run(self):
-    while True:
+    while not self.queue.shutdown:
       if self.isactive and len(self.queue.queued) > 0:
         if EnableDebug:
           print('Thread ' + self.runnerid + ' now dequeueing')
         self.queue.dequeue_message()
+    if EnableDebug:
+      print('Shutdown received by QueueRunner thread ' + self.runnerid)
+    return 0
+
+class DelaySweeper(threading.Thread):
+  def __init__(self, queue, interval=1):
+    super(DelaySweeper, self).__init__()
+    self.queue = queue
+    self.interval = interval
+
+  def run(self):
+    while not self.queue.shutdown:
+      if len(self.queue.delayed) > 0:
+        tosweep = []
+        for message in self.queue.delayed:
+          if message.orig_enqueuetime + message.delay <= time.time():
+            tosweep.append(message)
+        if len(tosweep) > 0:
+          if EnableDebug:
+            print('DelaySweeper found ' + str(len(tosweep)) + ' messages to move to the queue.')
+          for message in tosweep:
+            message.enqueuetime = time.time()
+            self.queue.delayed.remove(message)
+            self.queue.queued.append(message)
+            if EnableDebug:
+              print('DelaySweeper has swept message ' + message.uuid + ' to the queue.')
+      time.sleep(self.interval)
+    if EnableDebug:
+      print('Shutdown received by DelaySweeper thread')
+    return 0
 
 # Every Queue gets a stats thread that keeps an eye on things.  Console and Graphite stats output handled here too.  Also starts with queue invocation and shouldn't be invoked directly
     
@@ -297,9 +360,10 @@ class QueueStatsThread(threading.Thread):
     self.last_fin_count = 0
   def run(self):
     
-    while True:
+    while not self.queue.shutdown:
       self.queue.qdepth = len(self.queue.queued)
       self.queue.processed_qdepth = len(self.queue.processed)
+      self.queue.delayed_qdepth = len(self.queue.delayed)
       if len(self.queue.queued) > 0:
         try:
           self.queue.oldest = time.time() - self.queue.queued[0].enqueuetime
@@ -319,6 +383,7 @@ class QueueStatsThread(threading.Thread):
       curstats = {}
       curstats['qdepth'] = self.queue.qdepth
       curstats['processed_qdepth'] = self.queue.processed_qdepth
+      curstats['delayed_qdepth'] = self.queue.delayed_qdepth
       curstats['oldest'] = self.queue.oldest
       curstats['enqrate'] = self.queue.enqrate
       curstats['deqrate'] = self.queue.deqrate
@@ -346,6 +411,7 @@ class QueueStatsThread(threading.Thread):
 
         graphitestr += graphitestub + 'qdepth ' + str(curstats['qdepth']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'processed_qdepth ' + str(curstats['processed_qdepth']) + ' ' + curtime + '\n'
+        graphitestr += graphitestub + 'delayed_qdepth ' + str(curstats['delayed_qdepth']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'oldest ' + str(curstats['oldest']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'enqrate ' + str(curstats['enqrate']) + ' ' + curtime + '\n'
         graphitestr += graphitestub + 'deqrate ' + str(curstats['deqrate']) + ' ' + curtime + '\n'
@@ -372,6 +438,7 @@ class QueueStatsThread(threading.Thread):
         outstr = time.asctime() + ' - QStats:' + self.queue.name + ':'
         outstr += str(curstats['qdepth']) + ','
         outstr += str(curstats['processed_qdepth']) + ','
+        outstr += str(curstats['delayed_qdepth']) + ','
         outstr += '{0:.2f}'.format(curstats['oldest']) + ','
         outstr += str(curstats['enqrate']) + ','
         outstr += str(curstats['deqrate']) + ','
@@ -382,6 +449,11 @@ class QueueStatsThread(threading.Thread):
         outstr += str(curstats['fincounter']) + ','
         outstr += str(curstats['retrycounter'])
         print(outstr)
-      time.sleep(self.interval)
-  
-
+      for i in range(0, self.interval):
+        if self.queue.shutdown: 
+          break
+        else:
+          time.sleep(1)
+    if EnableDebug:
+      print('Shutdown received by queue stats thread')
+    return 0
