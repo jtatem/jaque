@@ -10,14 +10,14 @@ histdata = []
 # Queue example script that does a basic HTTP GET against several URLs at a defined interval and writes a log reporting the HTTP status code, response size, and time taken per test
 
 # Create the queue
-WorkQueue = Queue(threads=3, name='WorkQueue')
+WorkQueue = Queue(threads=5, name='WorkQueue')
 
 # List of URLs to check
-worklist = ['http://www.cnn.com', 'http://www.akamai.net', 'http://www.ebay.com', 'http://www.stackexchange.com', 'http://www.wired.com', 'http://www.arin.net', 'http://www.paypal.com', 'http://www.reddit.com', 'http://www.icann.org', 'http://imgur.com', 'http://192.168.0.4', 'http://192.168.0.48:5000']
-#worklist = ['http://www.akamai.net']
-#worklist = ['http://192.168.0.35/yep.html']
+worklist = ['http://www.cnn.com', 'http://www.akamai.net', 'http://www.ebay.com', 'http://www.stackexchange.com', 'http://www.wired.com', 'http://www.arin.net', 'http://www.paypal.com', 'http://www.reddit.com', 'http://www.icann.org', 'http://imgur.com']
+
 # Log file for monitoring output
 logfile = './log.out'
+shutdown = False
 
 # This thread will read from the processed list and write the results to disk, also re-enqueues message for next execution
 class ResultLogger(threading.Thread):
@@ -26,7 +26,7 @@ class ResultLogger(threading.Thread):
     self.sleep_cycle = sleep_cycle
 
   def run(self):
-    while True:
+    while not shutdown:
       message = WorkQueue.pop_processed()
       outfile = open(logfile, 'a')
       if message is not None: 
@@ -47,20 +47,10 @@ class ResultLogger(threading.Thread):
         outline = timestamp + ',' + myurl + ',' + mycode + ',' + mysize + ',' + mytime + ',' + myenqtime + ',' + mydeqtime + ',' + myfintime + ',' + myattempts + '\n'
         outfile.write(outline)
         outfile.close()
-        newenq = ReEnqueuer(message.payload)
-        newenq.start()
+        newmessage = Message(message.payload, handler_func, retry=True, delay=30)
+        WorkQueue.enqueue_message(newmessage)
       time.sleep(self.sleep_cycle)
-
-class ReEnqueuer(threading.Thread):
-  def __init__(self, payload, delay=30):
-    super(ReEnqueuer, self).__init__()
-    self.payload = payload
-    self.delay = delay
-
-  def run(self):
-    time.sleep(self.delay)
-    message = Message(self.payload, handler_func, retry=True)
-    WorkQueue.enqueue_message(message)
+    return 0
 
 class DataLogger(threading.Thread):
   def __init__(self, max_keep=20, interval=30, stale=300):
@@ -70,7 +60,7 @@ class DataLogger(threading.Thread):
     self.stale = 30
 
   def run(self):
-    while True:
+    while not shutdown:
       if len(histdata) >= self.max_keep:
         histdata.pop(0)
       if len(curdata) > 0:
@@ -90,7 +80,12 @@ class DataLogger(threading.Thread):
               outstr += 's'
             outstr += '  '
           print(outstr)
-      time.sleep(self.interval)
+      for i in range(0, self.interval):
+        if shutdown:
+          break
+        else: 
+          time.sleep(1)
+    return 0
 
 # Handler that will be invoked by the check messages, takes URL as input, returns a dict with url, response code, response size, and request time
 def handler_func(url):
@@ -132,3 +127,18 @@ if __name__ == '__main__':
 
   datalogger = DataLogger()
   datalogger.start()
+
+  while not shutdown:
+    try:
+      time.sleep(1)
+    except KeyboardInterrupt:
+      WorkQueue.shutdown = True
+      shutdown = True
+      print('Waiting for background threads to exit, this may take up to 30 seconds')
+      sys.stdout.write('Threads Remaining: ')
+      sys.stdout.flush()
+      while threading.active_count() > 1:
+        sys.stdout.write(str(threading.active_count()) + ' ')
+        sys.stdout.flush()
+        time.sleep(1)
+      print('\nShutdown completed') 
