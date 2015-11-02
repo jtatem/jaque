@@ -154,7 +154,11 @@ class Queue(object):
     sweeper = DelaySweeper(self, interval=1)
     sweeper.start()
 
+  def exit(self):
+    self.shutdown = True
+
   # self explanatory
+
   def clear_counters(self):
     self.stats = []
     self.enqcounter = 0
